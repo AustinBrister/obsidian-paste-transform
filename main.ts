@@ -41,45 +41,39 @@ export default class PasteTransform extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
+		// Add settings tab for configuring rules
 		this.addSettingTab(new PasteTransformSettingsTab(this.app, this));
 
-		this.registerEvent(this.app.workspace.on("editor-paste", event => this.onPaste(event)));
-	}
+		// Register a new command that will perform the paste transformation
+		this.addCommand({
+			id: "paste-with-transform",
+			name: "Paste with Transform",
+			callback: async () => {
+				// Attempt to get HTML content first, then fallback to plain text
+				let clipboardText = await navigator.clipboard.readText();
+				let richText = "";
+				try {
+					richText = (await navigator.clipboard.read())?.find(item => item.types.includes("text/html"))?.getType("text/html") ? await (await navigator.clipboard.read()).find(item => item.types.includes("text/html"))!.getType("text/html").then(blob => blob.text()) : "";
+				} catch (e) {
+					// If any error occurs, fallback to plain text
+				}
+				let source = richText || clipboardText;
+				if (!source) return;
 
-	onPaste(event: ClipboardEvent){
-		if(event.defaultPrevented){
-			if (this.settings.debugMode) {
-				console.log("It doesn't try to apply rules because event prevented already.");
+				let result = this.applyRules(source);
+				if (this.settings.debugMode) {
+					console.log(`Replaced '${source}' -> '${result}'`);
+				}
+				let editor = this.app.workspace.activeEditor?.editor;
+				if (editor) {
+					editor.replaceSelection(result);
+				}
 			}
-			return;
-		}
-
-		let types = event.clipboardData?.types;
-		if (this.settings.debugMode) {
-			console.log("transform plugin, clipboard content types:", types);
-		}
-		if (types === undefined || types.length != 1 || types[0] != "text/plain"){
-			return;
-		}
-		let plainText = event.clipboardData?.getData("text/plain");
-		if (plainText === undefined || plainText == ""){
-			return;
-		}
-
-		let result = this.applyRules(plainText);
-		if (this.settings.debugMode) {
-			console.log(`Replaced '${plainText}' -> '${result}'`);
-		}
-
-		if (result != plainText) {
-			this.app.workspace.activeEditor?.editor?.replaceSelection(result);
-			event.preventDefault()
-		}
+		});
 	}
 
 	onunload() {
-
+		// Nothing specific to unload
 	}
 
 	async loadSettings() {
@@ -87,16 +81,11 @@ export default class PasteTransform extends Plugin {
 		this.compileRules();
 	}
 
-	compileRules()  {
+	compileRules() {
 		this.rules = [];
-		let minIndex = this.settings.patterns.length;
-		if (this.settings.replacers.length < minIndex){
-			minIndex = this.settings.replacers.length;
-		}
+		let minIndex = Math.min(this.settings.patterns.length, this.settings.replacers.length);
 		for (let i = 0; i < minIndex; i++){
-			this.rules.push(
-				new ReplaceRule(this.settings.patterns[i], this.settings.replacers[i])
-			)
+			this.rules.push(new ReplaceRule(this.settings.patterns[i], this.settings.replacers[i]));
 		}
 	}
 
@@ -104,20 +93,16 @@ export default class PasteTransform extends Plugin {
 		await this.saveData(this.settings);
 	}
 
-	public applyRules(source: string | null | undefined) : string {
-		if (source === undefined || source === null){
-			return ""
+	public applyRules(source: string | null | undefined): string {
+		if (source === undefined || source === null) {
+			return "";
 		}
 
 		let result = source;
-
-		for (let rule of this.rules){
-			if (source.search(rule.pattern) != -1) {
-				result = source.replace(rule.pattern, rule.replacer);
-				break
-			}
+		// Sequentially apply all replacement rules
+		for (let rule of this.rules) {
+			result = result.replace(rule.pattern, rule.replacer);
 		}
-
 		return result;
 	}
 }
@@ -131,7 +116,7 @@ class PasteTransformSettingsTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
@@ -141,87 +126,82 @@ class PasteTransformSettingsTab extends PluginSettingTab {
 		let tryDest: TextAreaComponent | null = null;
 
 		let plugin = this.plugin;
-		let handleChanges = function (){
+		let handleChanges = function () {
 			try {
-				tryDest?.setValue(plugin.applyRules(trySource?.getValue()))
+				tryDest?.setValue(plugin.applyRules(trySource?.getValue()));
 			} catch (e) {
-				tryDest?.setValue("ERROR:\n" + e)
+				tryDest?.setValue("ERROR:\n" + e);
 			}
-		}
+		};
 
-		let handleTextChange = async function (value: string, setAttr: (values: string[]) => any ){
+		let handleTextChange = async function (value: string, setAttr: (values: string[]) => any) {
 			let values = value.split("\n");
-			if (values.length > 0 && values.last() == "") {
-				values.pop()
+			if (values.length > 0 && values[values.length - 1] === "") {
+				values.pop();
 			}
 
-			setAttr(values)
+			setAttr(values);
 
 			try {
 				plugin.compileRules();
-				handleChanges()
+				handleChanges();
 				await plugin.saveSettings();
-			} catch (e){
-				tryDest?.setValue("ERROR:\n" + e)
+			} catch (e) {
+				tryDest?.setValue("ERROR:\n" + e);
 			}
-		}
+		};
 
 		new Setting(containerEl)
 			.setName("Transform rules")
-			.setDesc("Type regexp patterns in left box and replace rules in right box." +
-				"Every pattern and rule on a line." +
-				"Pattern and rules use matched by line numbers." +
-				"Regexp and replace rules use typescript rules."
-			)
-			.addTextArea(ta =>
-				{
-					patternsTa = ta;
-					patternsTa.setPlaceholder("patter 1\npattern 2\n")
+			.setDesc("Type regexp patterns in the left box and replace rules in the right box. " +
+				"Each line corresponds by number to a regex and its replacer. " +
+				"Uses TypeScript regex & replacement rules.")
+			.addTextArea(ta => {
+				patternsTa = ta;
+				patternsTa.setPlaceholder("pattern 1\npattern 2\n");
 
-					let patternsString = "";
-					for (let val of this.plugin.settings.patterns){
-						patternsString += val + "\n"
-					}
-					patternsTa.setValue(patternsString)
-					patternsTa.onChange(async value=> {
-						await handleTextChange(value, values => {
-							plugin.settings.patterns = values;
-						});
-					})
+				let patternsString = "";
+				for (let val of this.plugin.settings.patterns) {
+					patternsString += val + "\n";
 				}
-			)
-			.addTextArea(ta=>{
+				patternsTa.setValue(patternsString);
+				patternsTa.onChange(async value => {
+					await handleTextChange(value, values => {
+						plugin.settings.patterns = values;
+					});
+				});
+			})
+			.addTextArea(ta => {
 				replacersTa = ta;
-				replacersTa.setPlaceholder("replacer 1\nreplacer 2\n")
+				replacersTa.setPlaceholder("replacer 1\nreplacer 2\n");
 				let replacersString = "";
-				for (let val of this.plugin.settings.replacers){
-					replacersString += val + "\n"
+				for (let val of this.plugin.settings.replacers) {
+					replacersString += val + "\n";
 				}
-				replacersTa.setValue(replacersString)
-				replacersTa.onChange(async value=> {
+				replacersTa.setValue(replacersString);
+				replacersTa.onChange(async value => {
 					await handleTextChange(value, values => {
 						plugin.settings.replacers = values;
 					});
-				})
-			})
-		;
+				});
+			});
 
 		new Setting(containerEl)
 			.setName("Try rules")
 			.setDesc("Write original text here")
-			.addTextArea(ta=> {
+			.addTextArea(ta => {
 				trySource = ta;
-				ta.setPlaceholder("Sample text")
-				ta.onChange(_=> {
-					handleChanges()
-				})
+				ta.setPlaceholder("Sample text");
+				ta.onChange(_ => {
+					handleChanges();
+				});
 			});
 		new Setting(containerEl)
 			.setName("Result")
-			.setDesc("The result of rules apply to original text")
+			.setDesc("The result of applying the rules")
 			.addTextArea(ta => {
 				tryDest = ta;
-				ta.setPlaceholder("Transform result")
+				ta.setPlaceholder("Transform result");
 				ta.setDisabled(true);
 			});
 
@@ -230,9 +210,9 @@ class PasteTransformSettingsTab extends PluginSettingTab {
 			.addToggle(toggle => {
 				toggle.setValue(this.plugin.settings.debugMode);
 				toggle.onChange(async value => {
-					this.plugin.settings.debugMode = value
+					this.plugin.settings.debugMode = value;
 					await this.plugin.saveSettings();
-				})
-			})
+				});
+			});
 	}
 }
